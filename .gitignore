@@ -32,3 +32,17 @@ Thumbs.db
 
 # Generated temporary files
 *.tmp
+
+# Generated project artifacts (root-level live test outputs)
+/requirements.md
+/architecture.md
+/database_design.md
+/implementation_plan.json
+
+# Generated workspaces (keep the placeholder)
+/workspace/*
+!/workspace/.gitkeep
+
+# Generated reports (keep the placeholder)
+/reports/*
+!/reports/.gitkeep

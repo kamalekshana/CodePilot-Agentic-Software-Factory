@@ -9,7 +9,7 @@ from config.settings import (
 
 
 class LLMClient:
-    """Shared AI client for all CodePilot agents."""
+    """Shared AI client for all specialized CodePilot agents."""
 
     def __init__(self):
         if not OPENROUTER_API_KEY:
@@ -21,10 +21,9 @@ class LLMClient:
         self.client = OpenAI(
             api_key=OPENROUTER_API_KEY,
             base_url=OPENROUTER_BASE_URL,
-            timeout=30.0,
+            timeout=120.0,
             max_retries=0,
         )
-
         self.model = OPENROUTER_MODEL
 
     def generate_response(
@@ -32,9 +31,9 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         temperature: float = 0.2,
-        max_tokens: int = 2000,
+        max_tokens: int = 8000,
     ) -> str:
-        """Send prompts to the configured model and return its response."""
+        """Generate a response while disabling unnecessary model reasoning."""
 
         try:
             response = self.client.chat.completions.create(
@@ -45,10 +44,34 @@ class LLMClient:
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
+                extra_body={
+                    "reasoning": {
+                        "enabled": False
+                    }
+                },
             )
 
-            message = response.choices[0].message
-            content = message.content
+            if not response.choices:
+                raise RuntimeError(
+                    f"The AI model {self.model} returned no response choices."
+                )
+
+            choice = response.choices[0]
+            content = choice.message.content
+
+            if getattr(choice, "finish_reason", None) == "length":
+                usage = getattr(response, "usage", None)
+                completion_tokens = (
+                    getattr(usage, "completion_tokens", "unknown")
+                    if usage else "unknown"
+                )
+                raise RuntimeError(
+                    "The AI response was truncated.\n"
+                    f"Model: {self.model}\n"
+                    f"Requested max_tokens: {max_tokens}\n"
+                    f"Completion tokens: {completion_tokens}\n"
+                    f"Response ID: {getattr(response, 'id', 'unknown')}"
+                )
 
             if isinstance(content, list):
                 content = "".join(
@@ -57,17 +80,17 @@ class LLMClient:
                     if getattr(item, "text", None)
                 )
 
-            if not content:
-                content = getattr(message, "reasoning", None)
-
-            if not content:
+            if not isinstance(content, str) or not content.strip():
                 raise RuntimeError(
-                    "The AI model returned neither text nor reasoning."
+                    f"The AI model {self.model} returned no usable text. "
+                    f"Finish reason: {getattr(choice, 'finish_reason', None)}."
                 )
 
             return content.strip()
 
         except Exception as error:
+            if isinstance(error, RuntimeError):
+                raise
             raise RuntimeError(
                 f"LLM request failed: {type(error).__name__}: {error}"
             ) from error
