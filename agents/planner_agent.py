@@ -42,6 +42,10 @@ RULES:
 10. Ensure execution_order respects all dependencies.
 11. Include every task exactly once in execution_order.
 12. Do not create circular dependencies.
+13. Before returning JSON, compare all task IDs against
+    execution_order.
+14. Verify that both lists contain exactly the same task IDs.
+15. Verify that every dependency appears before its dependent task.
 
 OUTPUT:
 Return ONLY valid JSON.
@@ -74,7 +78,7 @@ Do not include explanations outside the JSON.
         requirements: str,
         architecture: str,
     ) -> dict:
-        """Generate and validate a dependency-aware implementation plan."""
+        """Generate and strictly validate an implementation plan."""
 
         if not isinstance(requirements, str) or not requirements.strip():
             raise ValueError("Requirements document cannot be empty.")
@@ -91,12 +95,18 @@ SOFTWARE REQUIREMENTS:
 SYSTEM ARCHITECTURE:
 {architecture.strip()}
 
+IMPORTANT FINAL VALIDATION:
+- Count every task ID in the tasks array.
+- Include every task ID exactly once in execution_order.
+- Do not omit even one task.
+- Place dependencies before dependent tasks.
+- Do not include unknown task IDs.
+
 Return the complete implementation plan as valid JSON.
 """
 
         result = self.run(user_prompt)
 
-        # Extract JSON if the model unexpectedly adds code fences.
         cleaned = result.strip()
         cleaned = re.sub(
             r"^```(?:json)?\s*",

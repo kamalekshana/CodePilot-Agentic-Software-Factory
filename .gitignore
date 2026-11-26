@@ -33,6 +33,17 @@ Thumbs.db
 # Generated temporary files
 *.tmp
 
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary recovery scripts
+resume_coding.py
+retry_failed_task.py
+retry_remaining_tasks.py
+workspace_save_demo.py
+
 # Generated project artifacts (root-level live test outputs)
 /requirements.md
 /architecture.md

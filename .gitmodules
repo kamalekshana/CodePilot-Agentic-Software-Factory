@@ -1,0 +1,3 @@
+[submodule "vendor/CodePilot"]
+	path = vendor/CodePilot
+	url = https://github.com/kamalekshana/CodePilot.git
