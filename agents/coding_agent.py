@@ -1,32 +1,36 @@
 
+import hashlib
+import json
 import re
 from pathlib import Path
-from typing import Any
 
+from core.approval_manager import ApprovalManager
 from core.base_agent import BaseAgent
 from core.llm_client import LLMClient
 from schemas.agent_response import AgentResponse, AgentStatus
+from schemas.fix_task import FixTask
 from schemas.implementation_plan import ImplementationPlan
 from services.project1_adapter import Project1Adapter
 from services.workspace_manager import WorkspaceManager
 
 
 class CodingAgent(BaseAgent):
-    """Generates project files using Project 1 through Project 2."""
+    """Generates project files and applies approved code corrections."""
 
     def __init__(
         self,
         llm_client: LLMClient,
         project1_adapter: Project1Adapter | None = None,
         workspace_manager: WorkspaceManager | None = None,
+        approval_manager: ApprovalManager | None = None,
     ):
         super().__init__(
             name="Coding Agent",
-            role="Software Code Generation",
+            role="Software Code Generation and Correction",
             llm_client=llm_client,
             description=(
-                "Generates application source files from validated "
-                "implementation plans using Project 1's coding engine."
+                "Generates application source files using Project 1 "
+                "and applies human-approved code corrections."
             ),
         )
 
@@ -40,6 +44,10 @@ class CodingAgent(BaseAgent):
                 llm_client=llm_client,
                 workspace_manager=self.workspace_manager,
             )
+        )
+
+        self.approval_manager = (
+            approval_manager or ApprovalManager()
         )
 
     @property
@@ -63,7 +71,6 @@ RULES:
 
     @staticmethod
     def _slug(value: str) -> str:
-        """Convert task information into a safe filename component."""
         slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", value.strip())
         return slug.strip("_").lower() or "task"
 
@@ -71,7 +78,6 @@ RULES:
         self,
         implementation_plan: dict | ImplementationPlan,
     ) -> ImplementationPlan:
-        """Convert and validate incoming implementation plan."""
         if isinstance(implementation_plan, ImplementationPlan):
             return implementation_plan
 
@@ -84,6 +90,181 @@ RULES:
             "Implementation plan must be a dictionary or "
             "ImplementationPlan object."
         )
+
+    def _get_fix_task(self, fix_task: FixTask | dict) -> FixTask:
+        if isinstance(fix_task, FixTask):
+            return fix_task
+
+        if isinstance(fix_task, dict):
+            return FixTask.model_validate(fix_task)
+
+        raise ValueError(
+            "Fix task must be a FixTask object or dictionary."
+        )
+
+    def _validate_fix_file(self, workspace, filename):
+        project_dir = self.workspace_manager._resolve_project_dir(
+            workspace
+        )
+
+        if not isinstance(filename, str) or not filename.strip():
+            raise ValueError("Filename cannot be empty.")
+
+        if Path(filename).suffix.lower() != ".py":
+            raise ValueError("Only Python files can be corrected.")
+
+        file_path = self.workspace_manager._resolve_file_path(
+            project_dir,
+            filename,
+        )
+
+        if not file_path.is_file():
+            raise FileNotFoundError(
+                f"Correction target does not exist: {filename}"
+            )
+
+        return project_dir, file_path
+
+    def request_fix_approval(
+        self,
+        workspace,
+        fix_task: FixTask | dict,
+    ):
+        """Request human approval before modifying a project file."""
+
+        task = self._get_fix_task(fix_task)
+
+        project_dir, file_path = self._validate_fix_file(
+            workspace,
+            task.filename,
+        )
+
+        original_code = file_path.read_text(encoding="utf-8")
+
+        details = {
+            "filename": task.filename,
+            "error_summary": task.error_summary,
+            "root_cause": task.root_cause,
+            "correction_instructions": task.correction_instructions,
+            "original_sha256": hashlib.sha256(
+                original_code.encode("utf-8")
+            ).hexdigest(),
+        }
+
+        request = self.approval_manager.request_approval(
+            action="apply_code_fix",
+            details=json.dumps(details, indent=2),
+            resource=str(file_path),
+        )
+
+        return request
+
+    def apply_fix_task(
+        self,
+        workspace,
+        fix_task: FixTask | dict,
+        approval_id: str,
+    ) -> AgentResponse:
+        """Apply a correction only after verifying human approval."""
+
+        try:
+            task = self._get_fix_task(fix_task)
+
+            project_dir, file_path = self._validate_fix_file(
+                workspace,
+                task.filename,
+            )
+
+            request = self.approval_manager.get_request(approval_id)
+
+            if request.action != "apply_code_fix":
+                raise PermissionError(
+                    "Approval is not valid for code correction."
+                )
+
+            if request.resource != str(file_path):
+                raise PermissionError(
+                    "Approval does not match the requested file."
+                )
+
+            if not self.approval_manager.is_approved(approval_id):
+                raise PermissionError(
+                    "Human approval is required before modifying code."
+                )
+
+            approval_details = json.loads(request.details)
+
+            original_code = file_path.read_text(encoding="utf-8")
+
+            current_hash = hashlib.sha256(
+                original_code.encode("utf-8")
+            ).hexdigest()
+
+            if current_hash != approval_details["original_sha256"]:
+                raise RuntimeError(
+                    "The source file changed after approval was requested. "
+                    "Request approval again before applying the fix."
+                )
+
+            error_context = f"""
+ERROR SUMMARY:
+{task.error_summary}
+
+ROOT CAUSE:
+{task.root_cause}
+
+REQUIRED CORRECTION:
+{task.correction_instructions}
+
+RELATED TEST:
+{task.related_test or "Not specified"}
+"""
+
+            error_analysis = self.project1_adapter.analyse_error(
+                original_code,
+                error_context,
+            )
+
+            corrected_code = self.project1_adapter.fix_code(
+                original_code,
+                error_analysis,
+            )
+
+            self.workspace_manager.validate_python_code(
+                corrected_code
+            )
+
+            saved_path = self.workspace_manager.write_file(
+                project_dir,
+                task.filename,
+                corrected_code,
+                overwrite=True,
+            )
+
+            return AgentResponse(
+                agent_name=self.name,
+                status=AgentStatus.SUCCESS,
+                output=f"Approved correction applied to {task.filename}.",
+                metadata={
+                    "filename": task.filename,
+                    "corrected_file": str(saved_path),
+                    "approval_id": approval_id,
+                    "approval_verified": True,
+                    "syntax_validated": True,
+                    "file_modified": True,
+                },
+            )
+
+        except Exception as error:
+            return AgentResponse(
+                agent_name=self.name,
+                status=AgentStatus.FAILED,
+                error=f"{type(error).__name__}: {error}",
+                metadata={
+                    "approval_id": approval_id,
+                    "file_modified": False,
+                },
+            )
 
     def generate_project(
         self,
